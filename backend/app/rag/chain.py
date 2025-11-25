@@ -64,7 +64,14 @@ EXECUTION INSTRUCTIONS:
     - Combine partial rows from multiple chunks to form complete holiday entries.
     - If you see "1 New Year..." in one chunk and "14 Makara Sankranti..." in another chunk for the same month, synthesize them into a unified list.
     - Never claim "insufficient data" if the chunks contain table fragments - reconstruct intelligently using visible patterns.
-10. Citation Mandate: Immediately following the main answer, provide a separate "Source Citation" section. You MUST cite the exact Document Title and specific source index for every piece of factual information used.
+10. **TEMPORAL REASONING FOR PROBATION STATUS:** When a question involves joining date and resignation/notice period:
+    - **CRITICAL**: If the retrieved context contains probation duration information (e.g., "probation period is 6 months from date of joining"), you MUST use this to determine the employee's status.
+    - Calculate the time between join date and resignation date.
+    - If this duration is LESS than the stated probation period, the employee is ON PROBATION.
+    - Example: If probation is 6 months and employee joined Nov 2025 and resigns Nov 30 2025, that's less than 1 month → employee is ON PROBATION.
+    - **DO NOT** give conditional answers like "if you are on probation" when you can definitively determine status from the timeline.
+    - State the determination clearly: "Since you joined in November 2025 and are resigning on November 30, 2025 (less than 1 month), you are on probation. Therefore, your notice period is 30 days (1 month)."
+11. Citation Mandate: Immediately following the main answer, provide a separate "Source Citation" section. You MUST cite the exact Document Title and specific source index for every piece of factual information used.
 
 OUTPUT FORMAT:
 
@@ -111,18 +118,79 @@ def build_rag_chain():
     return chain
 
 
-def run_rag(question: str, k: int = 4) -> Dict[str, Any]:
+def run_rag(question: str, k: int = 4, chat_history: list = None) -> Dict[str, Any]:
     """
     Executes the RAG flow:
        - retrieve relevant chunks
-       - build context
+       - build context (including chat history if provided)
        - run LCEL chain
        - return answer + sources
+    
+    Args:
+        question: Current user query
+        k: Number of chunks to retrieve
+        chat_history: Optional list of previous messages [{"role": "user"|"assistant", "content": "..."}]
     
     For multi-concept questions (hybrid + leave + holidays), we auto-boost k
     to ensure cross-document retrieval. The boost is calculated dynamically
     based on the number of unique documents in the vectorstore.
     """
+    
+    if chat_history is None:
+        chat_history = []
+    
+    # ========================================================================
+    # QUERY EXPANSION: Detect temporal patterns and expand with relevant keywords
+    # ========================================================================
+    # If query mentions joining + resignation within short timeframe, add "probation"
+    # to help retrieve Probation Policy documents
+    q_lower = question.lower()
+    expanded_query = question
+    
+    # Detect join date + resignation patterns (implies probation status)
+    join_indicators = ["joined", "join", "joining", "started", "start"]
+    resign_indicators = ["resign", "resignation", "notice period", "leave the org", "quit"]
+    
+    has_join = any(indicator in q_lower for indicator in join_indicators)
+    has_resign = any(indicator in q_lower for indicator in resign_indicators)
+    
+    # If query has both join and resign/notice period, expand with probation
+    if has_join and has_resign and "probation" not in q_lower:
+        expanded_query = question + " probation period duration"
+        logging.debug(f"Query expansion: Added 'probation period duration' to query")
+    
+    # Detect holiday-related queries that need the Holiday Calendar
+    holiday_query_indicators = ["next holiday", "upcoming holiday", "whats holiday", "what holiday", 
+                                 "which holiday", "remaining holiday", "future holiday"]
+    is_holiday_query = any(indicator in q_lower for indicator in holiday_query_indicators)
+    
+    if is_holiday_query and "calendar" not in q_lower:
+        expanded_query = expanded_query + " Holiday Calendar 2025 Bangalore mandatory optional"
+        logging.debug(f"Query expansion: Added Holiday Calendar keywords to query")
+    
+    # ========================================================================
+    # DOCUMENT LISTING QUERIES: Ensure all documents are represented
+    # ========================================================================
+    # Detect queries asking for list of documents/policies
+    doc_listing_indicators = [
+        "list all doc", "list doc", "all doc", "what doc", "which doc",
+        "list all polic", "list polic", "all polic", "what polic", "which polic",
+        "what can you help", "what info", "what information",
+        "available doc", "available polic", "access to"
+    ]
+    
+    is_doc_listing_query = any(indicator in q_lower for indicator in doc_listing_indicators)
+    
+    if is_doc_listing_query:
+        # For document listing queries, we need chunks from ALL documents
+        # Boost k to ensure we get at least one chunk from each document
+        from app.rag.vectorstore import get_unique_documents_count
+        num_docs = get_unique_documents_count()
+        k = max(k, num_docs * 2)  # At least 2 chunks per document
+        
+        # Expand query with document names to improve retrieval
+        expanded_query = question + " Holiday Calendar Probation Policy Separation Policy Hybrid Work Policy"
+        logging.debug(f"Document listing query detected. Boosted k={k}, expanded query")
     
     # Auto-boost k for multi-document queries
     # Detect multi-concept signals (holiday + leave + hybrid, or policy + calculation, etc.)
@@ -146,8 +214,10 @@ def run_rag(question: str, k: int = 4) -> Dict[str, Any]:
         ("september", "leave"), ("october", "leave"), ("november", "leave"),
         # Any month with any policy/procedure
         ("month", "policy"), ("policy", "procedure"),
+        # Notice period + resignation queries (need both Probation and Separation policies)
+        ("notice", "period"), ("resign", "notice"), ("resignation", "notice"),
     ]
-    q_lower = question.lower()
+    
     is_multi_concept = False
     for kw1, kw2 in multi_concept_keywords:
         if kw1 in q_lower and kw2 in q_lower:
@@ -160,7 +230,34 @@ def run_rag(question: str, k: int = 4) -> Dict[str, Any]:
             break
 
     retriever = get_retriever(k=k)
-    docs = retriever.invoke(question)   # LCEL-compatible API
+    # Use expanded query for retrieval to get better multi-document coverage
+    docs = retriever.invoke(expanded_query)   # LCEL-compatible API
+    
+    # ========================================================================
+    # DOCUMENT LISTING SPECIAL CASE: Inject complete document list
+    # ========================================================================
+    # For document listing queries, prepend a summary of ALL available documents
+    # to ensure the LLM can list them all, regardless of retrieval results
+    document_list_context = ""
+    if is_doc_listing_query:
+        from app.rag.vectorstore import get_chroma_client
+        client = get_chroma_client()
+        collection = client.get_or_create_collection(
+            name="hr_docs",
+            metadata={"hnsw:space": "cosine"}
+        )
+        all_items = collection.get()
+        
+        if all_items and all_items.get("metadatas"):
+            unique_docs = set()
+            for meta in all_items["metadatas"]:
+                source_file = meta.get("source_file", "")
+                if source_file:
+                    unique_docs.add(source_file)
+            
+            doc_list = sorted(list(unique_docs))
+            document_list_context = "[SYSTEM NOTE: Complete list of available documents in knowledge base: " + ", ".join(doc_list) + "]\n\n"
+            logging.debug(f"Injected document list: {doc_list}")
     
     # ========================================================================
     # TWO-PHASE CHUNK PROCESSING: MATCH FIRST, THEN RANK
@@ -310,6 +407,29 @@ def run_rag(question: str, k: int = 4) -> Dict[str, Any]:
         concept_overlap = len(question_concepts & chunk_words)
         score += min(8, concept_overlap)
         
+        # ===== DOCUMENT-TYPE BOOST (without hardcoding) =====
+        # If question asks about holidays/months, boost chunks with date/day content
+        question_lower = ' '.join(question_concepts).lower()
+        
+        has_holiday_signals = any(signal in question_lower for signal in 
+                                 ['holiday', 'january', 'february', 'march', 'april', 
+                                  'may', 'june', 'july', 'august', 'september', 
+                                  'october', 'november', 'december', 'mandate', 'optional'])
+        
+        # Content has holiday indicators (dates, day names, holiday structure)
+        content_lower = content.lower()
+        has_content_dates = any(date_signal in content_lower for date_signal in
+                               ['january', 'february', 'march', 'april', 'may', 'june',
+                                'july', 'august', 'september', 'october', 'november', 'december',
+                                'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 
+                                'saturday', 'sunday', 'mandate', 'optional'])
+        
+        # If query asks about holidays AND content contains holiday data → boost
+        if has_holiday_signals and has_content_dates and analysis['has_table_columns']:
+            score += 40  # STRONG boost for holiday tables
+        elif has_holiday_signals and has_content_dates:
+            score += 25  # Medium boost for holiday content
+        
         return score
     
     # ===== PHASE 1: FILTER BY MATCHING =====
@@ -408,11 +528,31 @@ def run_rag(question: str, k: int = 4) -> Dict[str, Any]:
         total_chunks = len(pieces)
         for src, cnt in source_counts.items():
             if cnt / total_chunks < 0.15:  # Very under-represented
-                source_dist_note = f"\n\n[IMPORTANT NOTE: The '{src}' is under-represented in the retrieved context. Please ensure you also consider and reference information from this document when it is relevant to answering the query.]\n"
+            source_dist_note = f"\n\n[IMPORTANT NOTE: The '{src}' is under-represented in the retrieved context. Please ensure you also consider and reference information from this document when it is relevant to answering the query.]\n"
                 break
 
     # join pieces with a clear separator so the LLM can see chunk boundaries
-    context = "\n\n---\n\n".join(pieces) + source_dist_note
+    # For document listing queries, prepend the complete document list
+    context = document_list_context + "\\n\\n---\\n\\n".join(pieces) + source_dist_note
+    
+    # ========================================================================
+    # CHAT HISTORY: Prepend conversation history for context-aware responses
+    # ========================================================================
+    # Format chat history as a conversation thread
+    if chat_history and len(chat_history) > 0:
+        history_text = "[CONVERSATION HISTORY]\\n"
+        for msg in chat_history[-10:]:  # Keep last 10 messages for context
+            role = msg.get("role", "unknown")
+            content = msg.get("content", "")
+            if role == "user":
+                history_text += f"User: {content}\\n"
+            elif role == "assistant":
+                history_text += f"Assistant: {content}\\n"
+        history_text += "[END OF CONVERSATION HISTORY]\\n\\n"
+        
+        # Prepend history to context
+        context = history_text + context
+        logging.debug(f"Added {len(chat_history)} messages to context")
 
     chain = build_rag_chain()
     today = datetime.now().strftime("%Y-%m-%d")

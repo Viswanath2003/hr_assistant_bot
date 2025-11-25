@@ -2,10 +2,13 @@
 
 from app.rag.loader import load_all_pdfs
 from app.rag.splitter import split_text
-from app.rag.vectorstore import add_to_chroma
+from app.rag.vectorstore import add_to_chroma, clear_collection
 
 def ingest_documents():
     print("📥 Starting ingestion pipeline...")
+    
+    # Clear existing collection to prevent duplicates
+    clear_collection()
 
     docs = load_all_pdfs()
     if not docs:

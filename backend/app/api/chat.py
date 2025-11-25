@@ -12,6 +12,12 @@ router = APIRouter()
 class ChatRequest(BaseModel):
     query: str
     k: int = 4
+    chat_history: list = []  # List of {"role": "user"|"assistant", "content": "..."}
+
+
+class ChatMessage(BaseModel):
+    role: str  # "user" or "assistant"
+    content: str
 
 
 @router.post("/chat")
@@ -22,7 +28,7 @@ def chat_endpoint(body: ChatRequest):
         raise HTTPException(status_code=400, detail="Query cannot be empty.")
 
     try:
-        result = run_rag(query, k=body.k)
+        result = run_rag(query, k=body.k, chat_history=body.chat_history)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

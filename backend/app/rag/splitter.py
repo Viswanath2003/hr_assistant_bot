@@ -9,7 +9,8 @@ def get_text_splitter():
     return RecursiveCharacterTextSplitter(
         chunk_size=settings.CHUNK_SIZE,
         chunk_overlap=settings.CHUNK_OVERLAP,
-        separators=["\n\n", "\n", ".", " ", ""]
+        # Prioritize larger breaks to preserve table structure
+        separators=["\n\n\n", "\n\n", "\n", ". ", " ", ""]
     )
 
 

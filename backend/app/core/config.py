@@ -22,8 +22,8 @@ class Settings:
     CHROMA_DIR = DATA_DIR / "chroma"
 
     # Chunking parameters
-    CHUNK_SIZE: int = 450
-    CHUNK_OVERLAP: int = 50
+    CHUNK_SIZE: int = 1000  # Increased from 450 to preserve table structure
+    CHUNK_OVERLAP: int = 150  # Increased from 50 for better context preservation
 
 
 settings = Settings()

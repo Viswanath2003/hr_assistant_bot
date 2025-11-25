@@ -33,6 +33,19 @@ def create_or_load_collection():
     return collection
 
 
+def clear_collection():
+    """
+    Delete the existing 'hr_docs' collection to remove all chunks.
+    Useful before re-ingestion to prevent duplicates.
+    """
+    try:
+        client = get_chroma_client()
+        client.delete_collection(name="hr_docs")
+        print("✅ Cleared existing collection 'hr_docs'")
+    except Exception as e:
+        print(f"⚠️ Could not clear collection (may not exist): {e}")
+
+
 def add_to_chroma(texts: List[str], metadatas: List[dict]):
     """
     Add documents + embeddings to ChromaDB (new API).
