@@ -5,9 +5,9 @@ from langchain_core.prompts import PromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 import logging
 
-from app.core.llm import get_llm
-from app.rag.vectorstore import get_retriever, calculate_dynamic_k
-from app.rag.filter import filter_chunks
+from ..core.llm import get_llm
+from .vectorstore import get_retriever, calculate_dynamic_k
+from .filter import filter_chunks
 import re
 
 
@@ -17,7 +17,7 @@ import re
 RAG_PROMPT = PromptTemplate(
     input_variables=["context", "question", "today"],
     template="""
-You are an **Expert HR Policy Assistant Bot** for Sigmoid, specializing in document-exclusive retrieval and synthesis. Your goal is to provide accurate, formally toned, and fully cited answers based ONLY on the context provided.
+You are an **Expert HR Policy Assistant Bot** for Sigmoid, named **SIHRA**, specializing in document-exclusive retrieval and synthesis. Your goal is to provide accurate, formally toned, and fully cited answers based ONLY on the context provided.
 
 CRITICAL INSTRUCTIONS & CONSTRAINTS (GUARDRAILS):
 
@@ -71,7 +71,11 @@ EXECUTION INSTRUCTIONS:
     - Example: If probation is 6 months and employee joined Nov 2025 and resigns Nov 30 2025, that's less than 1 month → employee is ON PROBATION.
     - **DO NOT** give conditional answers like "if you are on probation" when you can definitively determine status from the timeline.
     - State the determination clearly: "Since you joined in November 2025 and are resigning on November 30, 2025 (less than 1 month), you are on probation. Therefore, your notice period is 30 days (1 month)."
-11. Citation Mandate: Immediately following the main answer, provide a separate "Source Citation" section. You MUST cite the exact Document Title and specific source index for every piece of factual information used.
+
+12. **CONVERSATIONAL CONTEXT AWARENESS:** You are provided with a [CONVERSATION HISTORY] section at the beginning of the context.
+    - **CRITICAL**: Use this history to resolve pronouns (e.g., "it", "that", "the policy") and implicit references in the current USER QUESTION.
+    - If the user asks "is it mandatory?" or "what about the other one?", look at the previous Assistant response in the history to identify the subject.
+    - Treat the conversation as a continuous dialogue. Do not ask for clarification if the context is clear from the history.
 
 OUTPUT FORMAT:
 
@@ -79,9 +83,6 @@ The final output **MUST** adhere to this structure:
 
 <Answer Text (Formal and Synthesized, including any necessary conflict statements and cross-document linkages)>
 
-Source Citation(s):
-* [Document Title], [Source Index/Reference]
-* ... (List all sources used)
 
 RETRIEVED DOCUMENTS:
 {context}
@@ -184,7 +185,7 @@ def run_rag(question: str, k: int = 4, chat_history: list = None) -> Dict[str, A
     if is_doc_listing_query:
         # For document listing queries, we need chunks from ALL documents
         # Boost k to ensure we get at least one chunk from each document
-        from app.rag.vectorstore import get_unique_documents_count
+        from .vectorstore import get_unique_documents_count
         num_docs = get_unique_documents_count()
         k = max(k, num_docs * 2)  # At least 2 chunks per document
         
@@ -224,7 +225,7 @@ def run_rag(question: str, k: int = 4, chat_history: list = None) -> Dict[str, A
             # For multi-concept queries, use dynamically calculated k
             # This ensures we get chunks from all relevant documents
             # Formula: max(base_k * 5, num_documents * 3)
-            k = calculate_dynamic_k(base_k=4)
+            k = calculate_dynamic_k(question, base_k=4)
             is_multi_concept = True
             logging.debug(f"Multi-concept query detected. Dynamic k={k}")
             break
@@ -240,7 +241,7 @@ def run_rag(question: str, k: int = 4, chat_history: list = None) -> Dict[str, A
     # to ensure the LLM can list them all, regardless of retrieval results
     document_list_context = ""
     if is_doc_listing_query:
-        from app.rag.vectorstore import get_chroma_client
+        from .vectorstore import get_chroma_client
         client = get_chroma_client()
         collection = client.get_or_create_collection(
             name="hr_docs",
@@ -528,7 +529,7 @@ def run_rag(question: str, k: int = 4, chat_history: list = None) -> Dict[str, A
         total_chunks = len(pieces)
         for src, cnt in source_counts.items():
             if cnt / total_chunks < 0.15:  # Very under-represented
-            source_dist_note = f"\n\n[IMPORTANT NOTE: The '{src}' is under-represented in the retrieved context. Please ensure you also consider and reference information from this document when it is relevant to answering the query.]\n"
+                source_dist_note = f"\n\n[IMPORTANT NOTE: The '{src}' is under-represented in the retrieved context. Please ensure you also consider and reference information from this document when it is relevant to answering the query.]\n"
                 break
 
     # join pieces with a clear separator so the LLM can see chunk boundaries

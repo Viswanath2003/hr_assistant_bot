@@ -1,5 +1,5 @@
 from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
-from app.core.config import settings
+from .config import settings
 
 
 def get_llm():

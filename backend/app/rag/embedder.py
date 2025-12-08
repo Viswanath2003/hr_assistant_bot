@@ -1,4 +1,4 @@
-from app.core.llm import get_embedding_model
+from ..core.llm import get_embedding_model
 
 def get_embedder():
     """

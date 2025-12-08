@@ -2,7 +2,7 @@
 import os
 from typing import List, Dict, Tuple
 from pypdf import PdfReader
-from app.core.config import settings
+from ..core.config import settings
 
 
 def load_pdf_pages(file_path: str) -> List[Tuple[str, int]]:
